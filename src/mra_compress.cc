@@ -31,10 +31,10 @@ int main(int argc, char **argv) {
 #ifdef MRA_CUDA
   // todo
 #else
-  p = new double[K2NDIM];
-  result = new double[TWOK2NDIM];
-  tmp = new double[compress_tmp_size<3>(K)];
-  hgT = new double[TWOK2NDIM];
+  p = new double[N*K2NDIM];
+  result = new double[N*TWOK2NDIM];
+  tmp = new double[N*compress_tmp_size<3>(K)];
+  hgT = new double[N*TWOK2NDIM];
 #endif
 
   /* lets assume all children were zero so we pass nullptr */
