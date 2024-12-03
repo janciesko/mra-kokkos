@@ -29,11 +29,10 @@ namespace mra::detail {
 #ifdef __CUDACC__
 using Dim3 = dim3;
 #define GLOBALSCOPE __global__
-#else
+#else // __CUDACC__
 using Dim3 = mra::detail::dim3;
 #define GLOBALSCOPE
 #endif // __CUDACC__
-
 
 #ifdef __CUDACC__
 #define checkSubmit() \
@@ -42,8 +41,20 @@ using Dim3 = mra::detail::dim3;
     << cudaGetErrorString(cudaPeekAtLastError()) << std::endl;
 #define CALL_KERNEL(name, block, thread, shared, stream, args) \
   name<<<block, thread, shared, stream>>> args
-
-#else  // __CUDACC__
+#else if(MRA_KOKKOS)  // __CUDACC__
+#define checkSubmit()
+//Use Kokkos kernel launch API
+#define CALL_KERNEL(name, blocks, thread, shared, stream, args) do { \
+    auto threads = thread.y*thread.z;                         \
+    auto vec_len = thread.x;                                  \
+    typedef TeamPolicy<>::member_type team_handle;            \
+    Kokkos::parallel_for(TeamPolicy<>(blocks,threads,vec_len),\
+    KOKKOS_LAMBDA(const team_handle & team ){                 \
+      name args;                                              \
+    }\
+    );\
+  } while (0)
+#else // (!__CUDACC__) && (!__USE_KOKKOS__)
 #define checkSubmit()
 #define CALL_KERNEL(name, blocks, thread, shared, stream, args) do { \
     blockIdx = {0, 0, 0};                       \

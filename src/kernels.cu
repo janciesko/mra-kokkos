@@ -24,7 +24,25 @@ template <typename aT, typename bT, typename cT>
 SCOPE
 void mTxmq(std::size_t dimi, std::size_t dimj, std::size_t dimk,
            cT* __restrict__ c, const aT* a, const bT* b, std::ptrdiff_t ldb=-1) {
+
+  auto team = Kokkos::get_team_handle(); //Is this something you'd consider useful?
   if (ldb == -1) ldb=dimj;
+
+  int n = team.league_rank();
+  Kokkos::parallel_for(Kokkos::TeamThreadRange(team,dimi), [&] (const int& i) {
+      int thread_sum;
+      Kokkos::parallel_reduce(ThreadVectorRange(team,dimj), [&] (const int& j, int& lsum) {
+          lsum += a(i, j) * b(i, j); //please get rid of the pointer arithmetics
+                                     //in the original code.
+      },thread_sum);
+      Kokkos::single(Kokkos::PerThread(team), [&] () {
+          c(i * dimj) += thread_sum;
+      });
+  });
+
+  team.team_barrier();
+
+#ifdef 0
   /* trivial 2D implementation using 2D block partitioning */
   if (threadIdx.z == 0) {
     for (std::size_t i = threadIdx.y; i < dimi; i += blockDim.y) {
@@ -43,7 +61,8 @@ void mTxmq(std::size_t dimi, std::size_t dimj, std::size_t dimk,
       }
     }
   }
-  SYNCTHREADS();
+#endif
+  
 }
 
 template <Dimension NDIM, typename T>
@@ -86,51 +105,66 @@ DEVSCOPE void compress_kernel_impl(
    T* tmp,
    const std::array<const T*, 1<<NDIM>& in_ptrs)
 {
-  const bool is_t0 = 0 == (threadIdx.x + threadIdx.y + threadIdx.z);
-  {
-    const size_t K2NDIM    = std::pow(  K,NDIM);
-    const size_t TWOK2NDIM = std::pow(2*K,NDIM);
-    /* construct tensor views in shared memory
-     * TODO: should we bind the Kokkos team to the TensorView?
-     * Could it still be in shared memory?
-     * I found that allocating views in shared memory
-     * significantly reduced register use and allows
-     * for sufficient threads per block. */
-    SHARED TensorView<T,NDIM> s, d, p, workspace;
-    SHARED TensorView<T,2> hgT;
-    if (is_t0) {
-      s = TensorView<T,NDIM>(&tmp[0], 2*K);
-      workspace = TensorView<T, NDIM>(&tmp[TWOK2NDIM], 2*K);
-      d = TensorView<T,NDIM>(result_ptr, 2*K);
-      p = TensorView<T,NDIM>(p_ptr, K);
-      hgT = TensorView<T,2>(hgT_ptr, 2*K);
-    }
-    /* make sure all threads see the newly constructed views */
-    SYNCTHREADS();
 
-    /* zero d and p tensors through assignment */
-    d = 0.0;
-    p = 0.0;
+  auto team = Kokkos::get_team_handle(); //Is this something you'd consider useful?
+  int blockid = team.league_rank(); //blockIdx.x;
 
-    /* collect child slices into s */
-    for (int i = 0; i < 1<<NDIM; ++i) {
-      auto child_slice = get_child_slice<NDIM>(K, i);
-      const TensorView<T, NDIM> in(in_ptrs[i], K);
-      /* assign child into slice of s */
-      s(child_slice) = in;
-    }
+ // const bool is_t0 = 0 == (threadIdx.x + threadIdx.y + threadIdx.z);
 
-    // apply two-scale transformation
-    transform<NDIM>(s, hgT, d, workspace);
+  const size_t K2NDIM    = std::pow(  K,NDIM);
+  const size_t TWOK2NDIM = std::pow(2*K,NDIM);
+  /* construct tensor views in shared memory
+    * TODO: should we bind the Kokkos team to the TensorView?
+    * Could it still be in shared memory?
+    * I found that allocating views in shared memory
+    * significantly reduced register use and allows
+    * for sufficient threads per block. */
+  SHARED TensorView<T,NDIM> s, d, p, workspace;
+  SHARED TensorView<T,2> hgT;
 
-    /* extract first slice and store in p */
-    auto child_slice = get_child_slice<NDIM>(K, 0);
-    p = d(child_slice);
-    /* reset slice 0 through assignment */
-    d(child_slice) = 0.0;
+  //Single per Team
+  Kokkos::single (Kokkos::PerTeam(team), [=] () {
+    s = TensorView<T,NDIM>(&tmp[0], 2*K);
+    workspace = TensorView<T, NDIM>(&tmp[TWOK2NDIM], 2*K);
+    d = TensorView<T,NDIM>(result_ptr, 2*K);
+    p = TensorView<T,NDIM>(p_ptr, K);
+    hgT = TensorView<T,2>(hgT_ptr, 2*K);
+  });
+
+  team.team_barrier();
+
+  #ifdef 0
+  if (is_t0) {
+    s = TensorView<T,NDIM>(&tmp[0], 2*K);
+    workspace = TensorView<T, NDIM>(&tmp[TWOK2NDIM], 2*K);
+    d = TensorView<T,NDIM>(result_ptr, 2*K);
+    p = TensorView<T,NDIM>(p_ptr, K);
+    hgT = TensorView<T,2>(hgT_ptr, 2*K);
   }
-}
+  /* make sure all threads see the newly constructed views */
+  //  SYNCTHREADS();
+  #endif
+  /* zero d and p tensors through assignment */
+  d = 0.0;
+  p = 0.0;
 
+  /* collect child slices into s */
+  for (int i = 0; i < 1<<NDIM; ++i) {
+    auto child_slice = get_child_slice<NDIM>(K, i);
+    const TensorView<T, NDIM> in(in_ptrs[i], K);
+    /* assign child into slice of s */
+    s(child_slice) = in;
+  }
+
+  // apply two-scale transformation
+  transform<NDIM>(s, hgT, d, workspace);
+
+  /* extract first slice and store in p */
+  auto child_slice = get_child_slice<NDIM>(K, 0);
+  p = d(child_slice);
+  /* reset slice 0 through assignment */
+  d(child_slice) = 0.0;
+}
 
 /**
  * Entry point for compress
@@ -148,24 +182,40 @@ GLOBALSCOPE void compress_kernel(
   const T* hgT_ptr,
   T* tmp,
   const std::array<const T*, 1<<NDIM> in_ptrs)
+
 {
+  #ifdef 0
   const bool is_t0 = (0 == (threadIdx.x + threadIdx.y + threadIdx.z));
+  #endif
+  auto team = Kokkos::get_team_handle(); //Is this something you'd consider useful?
+
+  #ifdef 0
   int blockid = blockIdx.x;
+  #endif
+
+  int blockid = team.league_rank(); //blockIdx.x;
+
   const size_t K2NDIM    = std::pow(  K,NDIM);
   const size_t TWOK2NDIM = std::pow(2*K,NDIM);
+
   /* assemble input pointers for this thread block */
   SHARED std::array<const T*, 1<<NDIM> block_in_ptrs;
+  #ifdef 0
   if (is_t0) {
+  #endif
+  Kokkos::single (Kokkos::PerTeam(team), [=] () {
     for (std::size_t i = 0; i < 1<<NDIM; ++i) {
       block_in_ptrs[i] = (nullptr != in_ptrs[i]) ? &in_ptrs[i][K2NDIM*blockid] : nullptr;
     }
+  });
+  #ifdef 0
   }
+  #endif
   /* no need to sync threads here */
   compress_kernel_impl(K, &p_ptr[K2NDIM*blockid], &result_ptr[TWOK2NDIM*blockid],
                        hgT_ptr, &tmp[compress_tmp_size<NDIM>(K)*blockid],
                        block_in_ptrs);
 }
-
 
 /**
  * Submit a compress kernel
@@ -190,7 +240,6 @@ void submit_compress_kernel(
   cudaStream_t stream)
 {
   Dim3 thread_dims = Dim3(K, K, 1); // figure out how to consider register usage
-
   CALL_KERNEL(compress_kernel, N, thread_dims, 0, stream,
     (N, K, p_ptr, result_ptr, hgT_ptr, tmp, in_ptrs));
   checkSubmit();

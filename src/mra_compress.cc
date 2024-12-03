@@ -42,7 +42,6 @@ int main(int argc, char **argv) {
   std::fill(in_ptrs.begin(), in_ptrs.end(), nullptr);
   submit_compress_kernel<double, 3>(N, K, p, result, hgT, tmp, in_ptrs, 0);
 
-
 #ifdef MRA_CUDA
   // todo
 #else

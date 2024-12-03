@@ -8,6 +8,10 @@
 #include <cuda_runtime.h>
 #endif // MRA_CUDA
 
+#ifdef MRA_KOKKOS
+#include <Kokkos_Core.hpp>
+#endif // MRA_KOKKOS
+
 #include "util.h"
 #include "types.h"
 

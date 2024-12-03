@@ -9,8 +9,6 @@
 #include "util.h"
 
 namespace mra {
-
-
   namespace detail {
     template<Dimension NDIM, Dimension I, typename TensorViewT, typename Fn, typename... Args>
     SCOPE void foreach_idx_impl(const TensorViewT& t, Fn&& fn, Args... args)
@@ -35,7 +33,17 @@ namespace mra {
           foreach_idx_impl<NDIM, I+1>(t, std::forward<Fn>(fn), args..., i);
         }
       }
-#else  // __CUDA_ARCH__
+#else if(MRA_KOKKOS) // __CUDA_ARCH__
+if constexpr (I < NDIM-1) {
+      auto team = Kokkos::get_team_handle(); //Is this something you'd consider useful?
+      Kokkos::parallel_for(Kokkos::TeamThreadRange(team,t.dim(I)), [&] (const int& i) {
+          foreach_idx_impl<NDIM, I+1>(t, std::forward<Fn>(fn), args..., i);
+      });
+      } else {
+        for (std::size_t i = 0; i < t.dim(I); ++i) {
+          fn(args..., i);
+        }
+#else //
       if constexpr (I < NDIM-1) {
         for (std::size_t i = 0; i < t.dim(I); ++i) {
           foreach_idx_impl<NDIM, I+1>(t, std::forward<Fn>(fn), args..., i);
